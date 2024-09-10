@@ -11,7 +11,7 @@ from functools import partial
 
 class OneFactorHW():
 
-    def __init__(self, discount_df, capflr_df, alpha=0.001, sigma=0.0001):
+    def __init__(self, discount_df, capflr_df):
         # nested class
         self.calc_tools = self.HWCalculationTools(self)
         self.rate_tools = self.RatesTools(self)
@@ -22,8 +22,8 @@ class OneFactorHW():
         self.capflrs = self.load_capflr(capflr_df)
 
         # initial values for parameters
-        self.alpha = alpha
-        self.sigma = sigma
+        self.alpha = None
+        self.sigma = None
 
         # optimized values for parameters
         self.opt_alpha = None
@@ -36,7 +36,7 @@ class OneFactorHW():
         # simulation default options
         self.max_maturity = 30
         self.dt = 1 / 12
-        self.n_paths = 1000
+        self.n_paths = 10000
 
     def load_initial_yield_curve(self, discount_df):
         """ Creates a dictionary containing discount factors and zero rates of initial yield curve.
@@ -78,28 +78,97 @@ class OneFactorHW():
 
         return train_data, test_data
 
-    def calibrate(self):
-        """ Calibrates Hull-White model to given instruments and initial term structure"""
+    def calibrate(self, alpha=0.001, sigma=0.0001):
+        """ Calibrates Hull-White model to given instruments and initial term structure using RMSE and log levels"""
         data_calib, _ = self.split_train_test()
 
         t0 = 0.
         r0 = self.rate_tools.zerorate_t(t0)
 
-        def opt_func(x, t0, r0):
+        def opt_func(x):
             self.alpha, self.sigma = x
 
-            sse = 0
+            sum_err = 0
             for capflr in data_calib:
                 model_price = self.calc_tools.get_model_analytical_price(t0, r0, capflr)
-                err = (model_price - capflr.market_price) ** 2
-                sse += err
+                # log levels
+                p1 = np.log(model_price)
+                p2 = np.log(capflr.market_price)
 
-            return np.sqrt(sse / len(self.capflrs))
+                # RMSE
+                err = (p1 - p2) ** 2
 
-        res = minimize(opt_func, (self.alpha, self.sigma), (t0, r0), method='Nelder-Mead',
-                       bounds=[(0, None), (0, None)])
+                sum_err += err
 
-        self.opt_alpha, self.opt_sigma, self.opt_res = (res.x[0], res.x[1], res)
+            return np.sqrt(sum_err / len(data_calib))
+
+        res = minimize(opt_func, (alpha, sigma), method='Nelder-Mead', bounds=[(0, None), (0, None)])
+
+        self.opt_alpha, self.opt_sigma, self.opt_res = res.x[0], res.x[1], res
+
+        print(f"Optimized parameters: {self.opt_alpha} (alpha), {self.opt_sigma} (sigma)")
+
+        # train_err = opt_func((self.opt_alpha, self.opt_sigma), data_calib)
+        # test_err = opt_func((self.opt_alpha, self.opt_sigma), data_test)
+        #
+        # print(f"Final train error ({'log_level' if is_log_level else 'level'} {error_metric}: {train_err})")
+        # print(f"Final test error ({'log_level' if is_log_level else 'level'} {error_metric}: {test_err})")
+
+    def get_error_metrics(self):
+        """ Returns ME, MAE, RMSE with log levels and levels"""
+
+        data_calib, data_test = self.split_train_test()
+
+        t0 = 0.
+        r0 = self.rate_tools.zerorate_t(t0)
+
+        def calculate_sum_err(capflr_data, is_log_level, err_metric):
+
+            sum_err = 0
+            for capflr in capflr_data:
+                model_price = self.calc_tools.get_model_analytical_price(t0, r0, capflr)
+
+                if is_log_level:
+                    p1 = np.log(model_price)
+                    p2 = np.log(capflr.market_price)
+                else:
+                    p1 = model_price
+                    p2 = capflr.market_price
+
+                if err_metric == "ME":
+                    err = p1 - p2
+                elif err_metric == "MAE":
+                    err = np.abs(p1 - p2)
+                elif err_metric == "RMSE":
+                    err = (p1 - p2) ** 2
+
+                sum_err += err
+
+            return np.sqrt(sum_err / len(capflr_data)) if err_metric == "RMSE" else sum_err / len(capflr_data)
+
+        # train data
+        train_log_ME = calculate_sum_err(data_calib, True, "ME")
+        train_log_MAE = calculate_sum_err(data_calib, True, "MAE")
+        train_log_RMSE = calculate_sum_err(data_calib, True, "RMSE")
+        train_ME = calculate_sum_err(data_calib, False, "ME")
+        train_MAE = calculate_sum_err(data_calib, False, "MAE")
+        train_RMSE = calculate_sum_err(data_calib, False, "RMSE")
+
+        # test data
+        test_log_ME = calculate_sum_err(data_test, True, "ME")
+        test_log_MAE = calculate_sum_err(data_test, True, "MAE")
+        test_log_RMSE = calculate_sum_err(data_test, True, "RMSE")
+        test_ME = calculate_sum_err(data_test, False, "ME")
+        test_MAE = calculate_sum_err(data_test, False, "MAE")
+        test_RMSE = calculate_sum_err(data_test, False, "RMSE")
+
+        err_metric_df = \
+            pd.DataFrame({'Scale': ['Log Level'] * 3 + ['Level'] * 3,
+                          'Metric': ['ME', 'MAE', 'RMSE'] * 2,
+                          'Train (Cap)': [train_log_ME, train_log_MAE, train_log_RMSE, train_ME, train_MAE, train_RMSE],
+                          'Test (Floor)': [test_log_ME, test_log_MAE, test_log_RMSE, test_ME, test_MAE, test_RMSE]})
+
+        return err_metric_df
 
     class RatesTools:
 
@@ -355,7 +424,7 @@ class OneFactorHW():
             plt.figure(figsize=(10, 6))
             plt.plot(self.hw.initial_yc.t, x1, marker='o', linestyle='-', markersize=4)
             plt.title("ESTR Yield Curve on 1st April 2024", fontsize=16)
-            plt.xlabel('Tenor', fontsize=14)
+            plt.xlabel('Maturity', fontsize=14)
             plt.ylabel(y_label, fontsize=14)
             plt.grid(True)
             plt.legend()
@@ -375,7 +444,7 @@ class OneFactorHW():
                      markersize=4)
             plt.title("At-The-Money ESTR Interest Rate Cap and Floor Implied Normal Volatility")
 
-            plt.xlabel('Tenor', fontsize=14)
+            plt.xlabel('Maturity', fontsize=14)
             plt.ylabel('Implied Normal Volatility', fontsize=14)
             plt.grid(True)
             plt.legend()
@@ -391,7 +460,7 @@ class OneFactorHW():
             plt.plot(np.arange(361) * 1 / 12, self.hw.rate_tools.f_0_t(np.arange(361) * 1 / 12, dt, intpol) * 100,
                      label="Market instantaneous forward rate", linestyle='-', markersize=4)
             plt.title("Market Instantaneous Forward Rate and Initial Term Structure")
-            plt.xlabel('Tenor', fontsize=14)
+            plt.xlabel('Maturity', fontsize=14)
             plt.ylabel('Interest Rate (%)', fontsize=14)
             plt.grid(True)
             plt.legend()
@@ -444,7 +513,7 @@ class OneFactorHW():
             plt.plot(t, mean_mc_zero_rates * 100,
                      label='Simulated Mean Zero Rates (Hull-White)', linestyle='-')
 
-            plt.xlabel('Tenor', fontsize=14)
+            plt.xlabel('Maturity', fontsize=14)
             plt.ylabel('Interest Rate (%)', fontsize=14)
             plt.title(
                 f'Simulated Short Rates and Zero Rates (alpha: {self.hw.opt_alpha:.4f}, sigma: {self.hw.opt_sigma:.4f})')
@@ -467,7 +536,7 @@ class OneFactorHW():
             plt.plot(np.arange(361) * 1 / 12, self.hw.rate_tools.f_0_t(np.arange(361) * 1 / 12, dt, intpol) * 100,
                      label="Market instantaneous forward rate", linestyle='-', markersize=4)
 
-            plt.xlabel('Tenor', fontsize=14)
+            plt.xlabel('Maturity', fontsize=14)
             plt.ylabel('Interest Rate (%)', fontsize=14)
             plt.title(
                 f'Simulated Short Rates and Market Instantaneous Forward Rates (alpha: {self.hw.opt_alpha:.4f}, sigma: {self.hw.opt_sigma:.4f})')
@@ -475,12 +544,13 @@ class OneFactorHW():
             plt.grid(True)
             plt.show()
 
-        def plot_price_comparison(self, is_train=True):
+        def plot_price_comparison(self, is_train=True, y_log=True):
             train, test = self.hw.split_train_test()
             if is_train:
                 capflrs = train
             else:
                 capflrs = test
+
             t0 = 0.
             r0 = self.hw.rate_tools.zerorate_t(t0)
             model_prices = []
@@ -492,18 +562,13 @@ class OneFactorHW():
                 maturities.append(capflr.maturity)
 
             plt.figure(figsize=(10, 6))
-            plt.plot(maturities, model_prices, label='Model Prices', marker='o')
-            plt.plot(maturities, market_prices, label='Market Prices', linestyle='--', marker='o', color='orange')
-
-            for i, maturity in enumerate(maturities):
-                difference = model_prices[i] - market_prices[i]
-                plt.annotate(f'{difference:,.0f}', (maturity, model_prices[i]), textcoords="offset points",
-                             xytext=(0, 10), ha='center')
+            plt.plot(maturities, np.log(model_prices) if y_log else model_prices, label='Model Prices', marker='o')
+            plt.plot(maturities, np.log(market_prices) if y_log else market_prices, label='Market Prices', linestyle='--', marker='o', color='orange')
 
             formatter = FuncFormatter(lambda x, pos: f'{x:,.0f}')
             plt.gca().yaxis.set_major_formatter(formatter)
-            plt.xlabel('Tenor', fontsize=14)
-            plt.ylabel('Prices (EUR)', fontsize=14)
+            plt.xlabel('Maturity', fontsize=14)
+            plt.ylabel('Logged Prices (EUR)' if y_log else 'Prices (EUR)', fontsize=14)
             plt.title(
                 f'Comparison of Model Prices and Market Prices for {"Train (Cap)" if is_train else "Test (Floor)"} Data',
                 fontsize=16)
@@ -516,16 +581,22 @@ if __name__ == '__main__':
     discount_df = pd.read_csv('./data/ESTR_df.csv')
     capflr_df = pd.read_csv('./data/ESTR_capflr.csv')
     initial_a, initial_sig = 0.05, 0.0001
-    hw = OneFactorHW(discount_df, capflr_df, initial_a, initial_sig)
+    hw = OneFactorHW(discount_df, capflr_df)
 
-    hw.calibrate()
     hw.visualize.plot_initial_yc(plot_df=False)
     hw.visualize.plot_initial_yc(plot_df=True)
     hw.visualize.plot_m_fwd_rate(intpol="linear")
     hw.visualize.plot_m_fwd_rate(intpol="log_linear")
     hw.visualize.plot_m_fwd_rate(intpol="cubic")
     hw.visualize.plot_capflr()
-    hw.visualize.plot_price_comparison(is_train=True)
-    hw.visualize.plot_price_comparison(is_train=False)
+
+    hw.calibrate(initial_a, initial_sig)
+    hw.get_error_metrics()
+
+    hw.visualize.plot_price_comparison(is_train=True, y_log=True)
+    hw.visualize.plot_price_comparison(is_train=False, y_log=True)
+    hw.visualize.plot_price_comparison(is_train=True, y_log=False)
+    hw.visualize.plot_price_comparison(is_train=False, y_log=False)
+
     hw.visualize.plot_short_rates_zero_rates()
     hw.visualize.plot_short_rates_mfwd_rates()
