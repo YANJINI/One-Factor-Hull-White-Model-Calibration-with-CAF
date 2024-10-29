@@ -605,20 +605,21 @@ if __name__ == '__main__':
     hw.visualize.plot_short_rates_mfwd_rates()
 
 
-    t, mc_short_rates = hw.rate_tools.simulate_short_rates()
+
 
 
     #%% Update of "hw.visualize.plot_short_rates_zero_rates()" so to demonstrate simulated short rates match the initial term structure
 
     import scipy
 
+    t, mc_short_rates = hw.rate_tools.simulate_short_rates()
     mean_mc_short_rates = np.mean(mc_short_rates, axis=0)
     #mc_df = hw.rate_tools.short_rates_to_df(mc_short_rates, t)
     #mc_zero_rates = hw.rate_tools.df_to_zerorate(mc_df, t)
     #mc_zero_rates[:, 0] = mc_zero_rates[:, 1]
     #mean_mc_zero_rates = np.mean(mc_zero_rates, axis=0)
 
-    R = mc_short_rates.copy()
+    R = mc_short_rates.T.copy()
     years_grid = t
     nb_steps = R.shape[0] - 1
 
@@ -658,8 +659,8 @@ if __name__ == '__main__':
     # Plot the lines with smaller markers and pastel colors
     plt.plot(hw.initial_yc.t, hw.initial_yc.zerorates * 100,
              label='Initial Term Structure (Zero rates)', marker='o', linestyle='-', markersize=4)
-    # plt.plot(t, mean_mc_short_rates * 100,
-    #          label='Simulated Mean Short Rates (Hull-White)', linestyle='-')
+    plt.plot(t, mean_mc_short_rates * 100,
+             label='Simulated Mean Short Rates (Hull-White)', linestyle='-')
     plt.plot(t, mean_mc_zero_rates * 100,
              label='Simulated Mean Zero Rates (Hull-White)', linestyle='-')
     # plt.plot(t, mean_mc_zero_rates * 100,
