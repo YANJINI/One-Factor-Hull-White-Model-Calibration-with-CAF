@@ -578,6 +578,9 @@ class OneFactorHW():
 
 
 if __name__ == '__main__':
+    import os
+    os.chdir("C:/Users/shasa/Documents/One-Factor-Hull-White-Model-Calibration-with-CAF/")
+
     discount_df = pd.read_csv('./data/ESTR_df.csv')
     capflr_df = pd.read_csv('./data/ESTR_capflr.csv')
     initial_a, initial_sig = 0.05, 0.0001
@@ -598,5 +601,76 @@ if __name__ == '__main__':
     hw.visualize.plot_price_comparison(is_train=True, y_log=False)
     hw.visualize.plot_price_comparison(is_train=False, y_log=False)
 
-    hw.visualize.plot_short_rates_zero_rates()
+    hw.visualize.plot_short_rates_zero_rates() # Update below with different calc for "mean_mc_zero_rates"
     hw.visualize.plot_short_rates_mfwd_rates()
+
+
+    t, mc_short_rates = hw.rate_tools.simulate_short_rates()
+
+
+    #%% Update of "hw.visualize.plot_short_rates_zero_rates()" so to demonstrate simulated short rates match the initial term structure
+
+    import scipy
+
+    mean_mc_short_rates = np.mean(mc_short_rates, axis=0)
+    #mc_df = hw.rate_tools.short_rates_to_df(mc_short_rates, t)
+    #mc_zero_rates = hw.rate_tools.df_to_zerorate(mc_df, t)
+    #mc_zero_rates[:, 0] = mc_zero_rates[:, 1]
+    #mean_mc_zero_rates = np.mean(mc_zero_rates, axis=0)
+
+    R = mc_short_rates.copy()
+    years_grid = t
+    nb_steps = R.shape[0] - 1
+
+    # Integration R to get simulation discount factors.
+    # Integration optimised by being is vectorised and cumulative.
+    # Cumulative by using prior period integration, so only the current step is integrated in each iteration.
+    sim_dsc_factors = np.full(R.shape, np.nan)
+    sim_dsc_factors[0, :] = 1.0
+    cumulative_integrated_R = np.full(R.shape, np.nan)
+
+    # Initial integration at step 1
+    step_nb = 1
+    cumulative_integrated_R[step_nb] = scipy.integrate.simpson(
+        y=R[(step_nb - 1):(step_nb + 1), :], x=years_grid[:(step_nb + 1)], axis=0)
+    sim_dsc_factors[step_nb, :] = np.exp(-cumulative_integrated_R[step_nb])
+
+    # Integration from step 2 to nb_steps
+    for step_nb in range(2, nb_steps + 1):
+        cumulative_integrated_R[step_nb] = cumulative_integrated_R[step_nb - 1] + scipy.integrate.simpson(
+            y=R[(step_nb - 1):(step_nb + 1), :], x=years_grid[(step_nb - 1):(step_nb + 1)], axis=0)
+        sim_dsc_factors[step_nb, :] = np.exp(-cumulative_integrated_R[step_nb])
+
+    # Transform the simulated discount factors to continuously compounded zero rates
+    sim_cczrs = -1 * np.log(sim_dsc_factors) / years_grid[:, np.newaxis]
+
+    # Averages - these should align to the discount factor / zero rates term structure
+    avg_sim_dsc_factors = np.mean(sim_dsc_factors, axis=1)
+    avg_cczrs = -1 * np.log(avg_sim_dsc_factors) / years_grid
+    averages_df = pd.DataFrame({'years': years_grid, 'discount_factor': avg_sim_dsc_factors, 'cczr': avg_cczrs})
+    averages_df.to_clipboard()
+
+    mean_mc_zero_rates = avg_cczrs
+
+    # Plot the simulated zero rates
+
+    plt.figure(figsize=(10, 6))
+    # Plot the lines with smaller markers and pastel colors
+    plt.plot(hw.initial_yc.t, hw.initial_yc.zerorates * 100,
+             label='Initial Term Structure (Zero rates)', marker='o', linestyle='-', markersize=4)
+    # plt.plot(t, mean_mc_short_rates * 100,
+    #          label='Simulated Mean Short Rates (Hull-White)', linestyle='-')
+    plt.plot(t, mean_mc_zero_rates * 100,
+             label='Simulated Mean Zero Rates (Hull-White)', linestyle='-')
+    # plt.plot(t, mean_mc_zero_rates * 100,
+    #          label='Simulated Mean Zero Rates (Hull-White)', linestyle='-')
+
+    plt.xlabel('Maturity', fontsize=14)
+    plt.ylabel('Interest Rate (%)', fontsize=14)
+    plt.title(
+        f'Simulated Short Rates and Zero Rates V2 (alpha: {hw.opt_alpha:.4f}, sigma: {hw.opt_sigma:.4f})')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
